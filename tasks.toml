@@ -145,7 +145,7 @@ run = 'cargo +nightly test --all-features -- -Z unstable-options --shuffle'
 
 [install-dev]
 description = 'Install the current project in debug mode'
-run = 'cargo install --path . --debug'
+run = 'cargo install --path . --debug --locked'
 
 [xxx]
 hide = true
