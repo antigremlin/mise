@@ -29,7 +29,7 @@ stylua = "latest"
 pkl = "latest"
 #"python" = { version = "latest", virtualenv = "{{env.HOME}}/.cache/venv" }
 "ripgrep" = "latest"
-rust = "1.88"
+rust = { version = "1.88", components = ["rust-analyzer"] }
 "shellcheck" = "latest"
 "shfmt" = "latest"
 taplo = "latest"
