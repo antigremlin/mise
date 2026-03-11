@@ -155,8 +155,9 @@ impl Backend for NPMBackend {
     }
 
     async fn install_version_(&self, ctx: &InstallContext, tv: ToolVersion) -> Result<ToolVersion> {
-        self.check_install_deps(&ctx.config).await;
-        match Settings::get().npm.package_manager {
+        let package_manager = self.resolve_package_manager(&tv);
+        self.check_install_deps(&ctx.config, package_manager).await;
+        match package_manager {
             NpmPackageManager::Bun => {
                 CmdLineRunner::new("bun")
                     .arg("install")
@@ -235,7 +236,7 @@ impl Backend for NPMBackend {
         _config: &Arc<Config>,
         tv: &crate::toolset::ToolVersion,
     ) -> eyre::Result<Vec<std::path::PathBuf>> {
-        if Settings::get().npm.package_manager == NpmPackageManager::Npm {
+        if self.resolve_package_manager(tv) == NpmPackageManager::Npm {
             Ok(vec![tv.install_path()])
         } else {
             Ok(vec![tv.install_path().join("bin")])
@@ -244,6 +245,21 @@ impl Backend for NPMBackend {
 }
 
 impl NPMBackend {
+    /// Resolve the effective package manager for a given tool version.
+    /// Per-tool `package_manager` option takes precedence over the global setting.
+    fn resolve_package_manager(&self, tv: &ToolVersion) -> NpmPackageManager {
+        if let Some(pm_str) = tv.request.options().get("package_manager") {
+            if let Ok(pm) = pm_str.parse::<NpmPackageManager>() {
+                return pm;
+            }
+            warn!(
+                "invalid package_manager option '{}', falling back to global setting",
+                pm_str
+            );
+        }
+        Settings::get().npm.package_manager
+    }
+
     pub fn from_arg(ba: BackendArg) -> Self {
         Self {
             latest_version_cache: TokioMutex::new(
@@ -269,9 +285,9 @@ impl NPMBackend {
         .await
     }
 
-    /// Check dependencies for package installation (npm or bun based on settings)
-    async fn check_install_deps(&self, config: &Arc<Config>) {
-        match Settings::get().npm.package_manager {
+    /// Check dependencies for package installation (npm, bun, or pnpm)
+    async fn check_install_deps(&self, config: &Arc<Config>, package_manager: NpmPackageManager) {
+        match package_manager {
             NpmPackageManager::Bun => {
                 self.warn_if_dependency_missing(
                     config,
@@ -313,6 +329,8 @@ impl NPMBackend {
 mod tests {
     use super::*;
     use crate::cli::args::{BackendArg, BackendResolution};
+    use crate::toolset::{ToolSource, ToolVersionOptions};
+    use crate::toolset::tool_request::ToolRequest;
 
     fn create_npm_backend(tool: &str) -> NPMBackend {
         let ba = BackendArg::new_raw(
@@ -323,6 +341,23 @@ mod tests {
             BackendResolution::new(true),
         );
         NPMBackend::from_arg(ba)
+    }
+
+    fn create_tool_version(tool: &str, opts: ToolVersionOptions) -> ToolVersion {
+        let ba = BackendArg::new_raw(
+            "npm".to_string(),
+            Some(tool.to_string()),
+            tool.to_string(),
+            None,
+            BackendResolution::new(true),
+        );
+        let request = ToolRequest::Version {
+            backend: Arc::new(ba),
+            version: "1.0.0".to_string(),
+            options: opts,
+            source: ToolSource::Unknown,
+        };
+        ToolVersion::new(request, "1.0.0".to_string())
     }
 
     #[test]
@@ -343,5 +378,53 @@ mod tests {
         assert!(deps.contains(&"npm"));
         assert!(!deps.contains(&"bun"));
         assert!(!deps.contains(&"pnpm"));
+    }
+
+    #[test]
+    fn test_resolve_package_manager_default() {
+        let backend = create_npm_backend("prettier");
+        let tv = create_tool_version("prettier", ToolVersionOptions::default());
+        // With no per-tool option, falls back to global setting (default: npm)
+        assert_eq!(backend.resolve_package_manager(&tv), NpmPackageManager::Npm);
+    }
+
+    #[test]
+    fn test_resolve_package_manager_per_tool_bun() {
+        let backend = create_npm_backend("prettier");
+        let mut opts = ToolVersionOptions::default();
+        opts.opts.insert(
+            "package_manager".to_string(),
+            toml::Value::String("bun".to_string()),
+        );
+        let tv = create_tool_version("prettier", opts);
+        assert_eq!(backend.resolve_package_manager(&tv), NpmPackageManager::Bun);
+    }
+
+    #[test]
+    fn test_resolve_package_manager_per_tool_pnpm() {
+        let backend = create_npm_backend("prettier");
+        let mut opts = ToolVersionOptions::default();
+        opts.opts.insert(
+            "package_manager".to_string(),
+            toml::Value::String("pnpm".to_string()),
+        );
+        let tv = create_tool_version("prettier", opts);
+        assert_eq!(
+            backend.resolve_package_manager(&tv),
+            NpmPackageManager::Pnpm
+        );
+    }
+
+    #[test]
+    fn test_resolve_package_manager_invalid_falls_back() {
+        let backend = create_npm_backend("prettier");
+        let mut opts = ToolVersionOptions::default();
+        opts.opts.insert(
+            "package_manager".to_string(),
+            toml::Value::String("yarn".to_string()),
+        );
+        let tv = create_tool_version("prettier", opts);
+        // Invalid value falls back to global setting (default: npm)
+        assert_eq!(backend.resolve_package_manager(&tv), NpmPackageManager::Npm);
     }
 }
